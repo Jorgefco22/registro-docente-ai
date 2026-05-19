@@ -12,7 +12,7 @@ import {
 
 export const BottomNav: React.FC = () => {
   const { currentView, navigateTo } = useNavigation();
-  const { getStudentsInRisk } = useApp();
+  const { getStudentsInRisk, isSupabaseActive } = useApp();
   
   const riskCount = getStudentsInRisk().length;
 
@@ -38,10 +38,13 @@ export const BottomNav: React.FC = () => {
             onClick={() => navigateTo(item.view)}
             className={`bottom-nav-btn ${isActive ? 'active' : ''}`}
           >
-            <div className="bottom-nav-icon-wrapper">
+            <div className="bottom-nav-icon-wrapper" style={{ position: 'relative' }}>
               <Icon className="bottom-nav-icon" />
               {item.view === 'dashboard' && riskCount > 0 && (
                 <span className="bottom-nav-badge">{riskCount}</span>
+              )}
+              {item.view === 'settings' && isSupabaseActive && (
+                <span className="bottom-nav-cloud-dot" style={{ position: 'absolute', top: '-2px', right: '-4px', backgroundColor: '#34c759', width: '6px', height: '6px', borderRadius: '50%', boxShadow: '0 0 6px #34c759' }}></span>
               )}
             </div>
             <span className="bottom-nav-label">{item.label}</span>
@@ -51,3 +54,4 @@ export const BottomNav: React.FC = () => {
     </nav>
   );
 };
+

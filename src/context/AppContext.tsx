@@ -1,6 +1,8 @@
 /* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { ReactNode } from 'react';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import type { User, Session } from '@supabase/supabase-js';
 import {
   initialGroups,
   initialStudentsByGroup,
@@ -55,6 +57,17 @@ interface AppContextProps {
   // AI Settings
   geminiApiKey: string;
   setGeminiApiKey: (key: string) => void;
+
+  // Supabase Auth and Sync Status
+  user: User | null;
+  session: Session | null;
+  isSyncing: boolean;
+  isSupabaseActive: boolean;
+  login: (email: string, password: string) => Promise<{ error: any }>;
+  register: (email: string, password: string, name: string, school: string) => Promise<{ error: any }>;
+  logout: () => Promise<void>;
+  syncDataFromCloud: () => Promise<void>;
+  syncLocalToCloud: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextProps | undefined>(undefined);
@@ -100,7 +113,58 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return localStorage.getItem('rd_gemini_api_key') || '';
   });
 
-  // Save to localStorage whenever state changes
+  // Supabase Integration States
+  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [isSupabaseActive, setIsSupabaseActive] = useState<boolean>(() => isSupabaseConfigured());
+
+  // Listen to Supabase configuration changes via event or periodic check
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const active = isSupabaseConfigured();
+      if (active !== isSupabaseActive) {
+        setIsSupabaseActive(active);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isSupabaseActive]);
+
+  // Auth State Listener
+  useEffect(() => {
+    if (!isSupabaseActive) return;
+
+    // Get current session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        syncDataFromCloud();
+      }
+    });
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        syncDataFromCloud();
+      } else {
+        // Logged out
+        setGroups(initialGroups);
+        setStudentsByGroup(initialStudentsByGroup);
+        setAttendanceByGroup(initialAttendanceByGroup);
+        setCategoriesByGroup(initialCategoriesByGroup);
+        setColumnsByGroup(initialColumnsByGroup);
+        setGradesByGroup(initialGradesByGroup);
+        setLessonPlans(initialLessonPlans);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [isSupabaseActive]);
+
+  // Save to localStorage whenever state changes (Local Backup / Fallback)
   useEffect(() => {
     localStorage.setItem('rd_groups', JSON.stringify(groups));
   }, [groups]);
@@ -133,8 +197,348 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     localStorage.setItem('rd_gemini_api_key', geminiApiKey);
   }, [geminiApiKey]);
 
+  // Fetch full data from Supabase to Hydrate State
+  const syncDataFromCloud = async () => {
+    if (!isSupabaseActive) return;
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return;
+
+    setIsSyncing(true);
+    try {
+      // 1. Fetch groups
+      const { data: dbGroups, error: errGroups } = await supabase
+        .from('groups')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (errGroups) throw errGroups;
+
+      // 2. Fetch students
+      const { data: dbStudents, error: errStudents } = await supabase
+        .from('students')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (errStudents) throw errStudents;
+
+      // 3. Fetch attendance
+      const { data: dbAttendance, error: errAttendance } = await supabase
+        .from('attendance')
+        .select('*');
+      if (errAttendance) throw errAttendance;
+
+      // 4. Fetch grade categories
+      const { data: dbCats, error: errCats } = await supabase
+        .from('grade_categories')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (errCats) throw errCats;
+
+      // 5. Fetch grade columns
+      const { data: dbCols, error: errCols } = await supabase
+        .from('grade_columns')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (errCols) throw errCols;
+
+      // 6. Fetch student grades
+      const { data: dbGrades, error: errGrades } = await supabase
+        .from('student_grades')
+        .select('*');
+      if (errGrades) throw errGrades;
+
+      // 7. Fetch lesson plans
+      const { data: dbPlans, error: errPlans } = await supabase
+        .from('lesson_plans')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (errPlans) throw errPlans;
+
+      // Set State
+      const nextGroups = dbGroups?.map(g => ({
+        id: g.id,
+        name: g.name,
+        subject: g.subject,
+        grade: g.grade,
+        schedule: g.schedule || '',
+        studentsCount: dbStudents?.filter(s => s.group_id === g.id).length || 0,
+        average: 10, // will be computed reactively
+        attendanceRate: 100 // will be computed reactively
+      })) || [];
+
+      // Maps
+      const nextStudents: { [groupId: string]: Student[] } = {};
+      dbStudents?.forEach(s => {
+        if (!nextStudents[s.group_id]) nextStudents[s.group_id] = [];
+        nextStudents[s.group_id].push({
+          id: s.id,
+          name: s.name,
+          email: s.email || '',
+          parentEmail: s.parent_email || ''
+        });
+      });
+
+      const nextAttendance: { [groupId: string]: { [studentId: string]: { [date: string]: 'A' | 'F' | 'R' | 'J' } } } = {};
+      dbAttendance?.forEach(a => {
+        if (!nextAttendance[a.group_id]) nextAttendance[a.group_id] = {};
+        if (!nextAttendance[a.group_id][a.student_id]) nextAttendance[a.group_id][a.student_id] = {};
+        nextAttendance[a.group_id][a.student_id][a.date] = a.status as 'A' | 'F' | 'R' | 'J';
+      });
+
+      const nextCategories: { [groupId: string]: GradeCategory[] } = {};
+      dbCats?.forEach(c => {
+        if (!nextCategories[c.group_id]) nextCategories[c.group_id] = [];
+        nextCategories[c.group_id].push({
+          id: c.id,
+          name: c.name,
+          weight: Number(c.weight)
+        });
+      });
+
+      const nextColumns: { [groupId: string]: ColumnGrade[] } = {};
+      dbCols?.forEach(c => {
+        if (!nextColumns[c.group_id]) nextColumns[c.group_id] = [];
+        nextColumns[c.group_id].push({
+          id: c.id,
+          name: c.name,
+          categoryId: c.category_id
+        });
+      });
+
+      const nextGrades: { [groupId: string]: StudentGrade[] } = {};
+      dbGrades?.forEach(g => {
+        if (!nextGrades[g.group_id]) nextGrades[g.group_id] = [];
+        let row = nextGrades[g.group_id].find(r => r.studentId === g.student_id);
+        if (!row) {
+          row = { studentId: g.student_id, grades: {} };
+          nextGrades[g.group_id].push(row);
+        }
+        const numericVal = Number(g.value);
+        row.grades[g.column_id] = isNaN(numericVal) ? (g.value as any) : numericVal;
+      });
+
+      const nextPlans: LessonPlan[] = dbPlans?.map(p => ({
+        id: p.id,
+        title: p.title,
+        subject: p.subject,
+        gradeLevel: p.grade_level,
+        status: p.status as 'Completa' | 'Borrador',
+        steps: p.steps as any,
+        lastModified: p.last_modified
+      })) || [];
+
+      // Hydrate state
+      setGroups(nextGroups);
+      setStudentsByGroup(nextStudents);
+      setAttendanceByGroup(nextAttendance);
+      setCategoriesByGroup(nextCategories);
+      setColumnsByGroup(nextColumns);
+      setGradesByGroup(nextGrades);
+      setLessonPlans(nextPlans);
+      
+      console.log('Datos sincronizados correctamente desde la nube.');
+    } catch (err) {
+      console.error('Error al sincronizar datos desde Supabase:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Upload/Merge Local Data to Supabase (Punto 2 approved merge strategy)
+  const syncLocalToCloud = async () => {
+    if (!isSupabaseActive) return;
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return;
+    
+    const userId = session.user.id;
+    setIsSyncing(true);
+    try {
+      // 1. Upload groups
+      if (groups.length > 0) {
+        const groupsToUpsert = groups.map(g => ({
+          id: g.id,
+          user_id: userId,
+          name: g.name,
+          subject: g.subject,
+          grade: g.grade,
+          schedule: g.schedule
+        }));
+        await supabase.from('groups').upsert(groupsToUpsert);
+      }
+
+      // 2. Upload students
+      const allStudents: any[] = [];
+      Object.keys(studentsByGroup).forEach(groupId => {
+        studentsByGroup[groupId].forEach(s => {
+          allStudents.push({
+            id: s.id,
+            user_id: userId,
+            group_id: groupId,
+            name: s.name,
+            email: s.email,
+            parent_email: s.parentEmail
+          });
+        });
+      });
+      if (allStudents.length > 0) {
+        await supabase.from('students').upsert(allStudents);
+      }
+
+      // 3. Upload attendance
+      const allAttendance: any[] = [];
+      Object.keys(attendanceByGroup).forEach(groupId => {
+        Object.keys(attendanceByGroup[groupId]).forEach(studentId => {
+          Object.keys(attendanceByGroup[groupId][studentId]).forEach(dateStr => {
+            allAttendance.push({
+              user_id: userId,
+              group_id: groupId,
+              student_id: studentId,
+              date: dateStr,
+              status: attendanceByGroup[groupId][studentId][dateStr]
+            });
+          });
+        });
+      });
+      if (allAttendance.length > 0) {
+        await supabase.from('attendance').upsert(allAttendance);
+      }
+
+      // 4. Upload grade categories
+      const allCategories: any[] = [];
+      Object.keys(categoriesByGroup).forEach(groupId => {
+        categoriesByGroup[groupId].forEach(cat => {
+          allCategories.push({
+            id: cat.id,
+            user_id: userId,
+            group_id: groupId,
+            name: cat.name,
+            weight: cat.weight
+          });
+        });
+      });
+      if (allCategories.length > 0) {
+        await supabase.from('grade_categories').upsert(allCategories);
+      }
+
+      // 5. Upload grade columns
+      const allColumns: any[] = [];
+      Object.keys(columnsByGroup).forEach(groupId => {
+        columnsByGroup[groupId].forEach(col => {
+          allColumns.push({
+            id: col.id,
+            user_id: userId,
+            group_id: groupId,
+            category_id: col.categoryId,
+            name: col.name
+          });
+        });
+      });
+      if (allColumns.length > 0) {
+        await supabase.from('grade_columns').upsert(allColumns);
+      }
+
+      // 6. Upload student grades
+      const allGrades: any[] = [];
+      Object.keys(gradesByGroup).forEach(groupId => {
+        gradesByGroup[groupId].forEach(row => {
+          Object.keys(row.grades).forEach(columnId => {
+            allGrades.push({
+              user_id: userId,
+              group_id: groupId,
+              student_id: row.studentId,
+              column_id: columnId,
+              value: String(row.grades[columnId])
+            });
+          });
+        });
+      });
+      if (allGrades.length > 0) {
+        await supabase.from('student_grades').upsert(allGrades);
+      }
+
+      // 7. Upload lesson plans
+      if (lessonPlans.length > 0) {
+        const plansToUpsert = lessonPlans.map(p => ({
+          id: p.id,
+          user_id: userId,
+          title: p.title,
+          subject: p.subject,
+          grade_level: p.gradeLevel,
+          status: p.status,
+          steps: p.steps,
+          last_modified: p.lastModified
+        }));
+        await supabase.from('lesson_plans').upsert(plansToUpsert);
+      }
+
+      console.log('Datos locales fusionados en la nube con éxito.');
+    } catch (err) {
+      console.error('Error al fusionar datos locales en Supabase:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Auth Operations
+  const login = async (email: string, password: string) => {
+    setIsSyncing(true);
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      
+      // Load their data
+      if (data.session) {
+        setSession(data.session);
+        setUser(data.session.user);
+        await syncDataFromCloud();
+      }
+      return { error: null };
+    } catch (err: any) {
+      return { error: err };
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const register = async (email: string, password: string, name: string, school: string) => {
+    setIsSyncing(true);
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { name, school }
+        }
+      });
+      if (error) throw error;
+
+      if (data.session) {
+        setSession(data.session);
+        setUser(data.session.user);
+        // User created, sync their local data to the cloud! (Merge strategy)
+        await syncLocalToCloud();
+      }
+      return { error: null };
+    } catch (err: any) {
+      return { error: err };
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const logout = async () => {
+    setIsSyncing(true);
+    try {
+      await supabase.auth.signOut();
+      setSession(null);
+      setUser(null);
+    } catch (err) {
+      console.error('Error al cerrar sesión:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   // Actions
-  const addGroup = (name: string, subject: string, grade: string, schedule: string) => {
+  const addGroup = async (name: string, subject: string, grade: string, schedule: string) => {
     const newId = `g_${Date.now()}`;
     const newGroup: Group = {
       id: newId,
@@ -152,19 +556,45 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setAttendanceByGroup(prev => ({ ...prev, [newId]: {} }));
     
     // Default categories that sum 100%
-    setCategoriesByGroup(prev => ({
-      ...prev,
-      [newId]: [
-        { id: `c1_${newId}`, name: 'Tareas', weight: 40 },
-        { id: `c2_${newId}`, name: 'Exámenes', weight: 40 },
-        { id: `c3_${newId}`, name: 'Proyecto Final', weight: 20 }
-      ]
-    }));
+    const defaultCats = [
+      { id: `c1_${newId}`, name: 'Tareas', weight: 40 },
+      { id: `c2_${newId}`, name: 'Exámenes', weight: 40 },
+      { id: `c3_${newId}`, name: 'Proyecto Final', weight: 20 }
+    ];
+    setCategoriesByGroup(prev => ({ ...prev, [newId]: defaultCats }));
     setColumnsByGroup(prev => ({ ...prev, [newId]: [] }));
     setGradesByGroup(prev => ({ ...prev, [newId]: [] }));
+
+    // Supabase double-write
+    if (user) {
+      setIsSyncing(true);
+      try {
+        await supabase.from('groups').insert({
+          id: newId,
+          user_id: user.id,
+          name,
+          subject,
+          grade,
+          schedule
+        });
+        await supabase.from('grade_categories').insert(
+          defaultCats.map(c => ({
+            id: c.id,
+            user_id: user.id,
+            group_id: newId,
+            name: c.name,
+            weight: c.weight
+          }))
+        );
+      } catch (err) {
+        console.error('Error al guardar grupo en Supabase:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
   };
 
-  const deleteGroup = (groupId: string) => {
+  const deleteGroup = async (groupId: string) => {
     setGroups(prev => prev.filter(g => g.id !== groupId));
     
     const cleanState = <T,>(prev: Record<string, T>): Record<string, T> => {
@@ -178,9 +608,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCategoriesByGroup(cleanState);
     setColumnsByGroup(cleanState);
     setGradesByGroup(cleanState);
+
+    // Supabase double-write
+    if (user) {
+      setIsSyncing(true);
+      try {
+        await supabase.from('groups').delete().eq('id', groupId);
+      } catch (err) {
+        console.error('Error al borrar grupo de Supabase:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
   };
 
-  const addStudent = (groupId: string, name: string, email: string, parentEmail: string) => {
+  const addStudent = async (groupId: string, name: string, email: string, parentEmail: string) => {
     const studentId = `s_${Date.now()}`;
     const newStudent: Student = {
       id: studentId,
@@ -201,7 +643,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         studentId,
         grades: {}
       };
-      // Pre-fill columns with "P" (Pendiente)
       const cols = columnsByGroup[groupId] || [];
       cols.forEach(col => {
         newGradeRow.grades[col.id] = 'P';
@@ -219,9 +660,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return g;
     }));
+
+    // Supabase double-write
+    if (user) {
+      setIsSyncing(true);
+      try {
+        await supabase.from('students').insert({
+          id: studentId,
+          user_id: user.id,
+          group_id: groupId,
+          name,
+          email,
+          parent_email: parentEmail
+        });
+      } catch (err) {
+        console.error('Error al guardar alumno en Supabase:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
   };
 
-  const deleteStudent = (groupId: string, studentId: string) => {
+  const deleteStudent = async (groupId: string, studentId: string) => {
     setStudentsByGroup(prev => ({
       ...prev,
       [groupId]: (prev[groupId] || []).filter(s => s.id !== studentId)
@@ -246,22 +706,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       return g;
     }));
+
+    // Supabase double-write
+    if (user) {
+      setIsSyncing(true);
+      try {
+        await supabase.from('students').delete().eq('id', studentId);
+      } catch (err) {
+        console.error('Error al borrar alumno de Supabase:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
   };
 
   const importStudents = (groupId: string, text: string) => {
-    // Advanced intelligence to extract student names from text
-    // Handles formats like list items (1. John, 2- Mary), comma separated, tab separated or simple line breaks
     const lines = text.split(/[\n,;]/);
     const parsedNames: string[] = [];
 
     lines.forEach(line => {
-      // Remove numbering (e.g. "1.", "1 -", "1)") and clean trailing whitespaces
       let clean = line.replace(/^\s*\d+[.\-)\s]*/, '').trim();
-      // Remove email or role text if included
-      clean = clean.replace(/\([^)]+\)/g, '').trim(); // Remove parenthetical info
+      clean = clean.replace(/\([^)]+\)/g, '').trim();
       
       if (clean.length > 2 && !clean.includes('@')) {
-        // Capitalize words
         const formatted = clean.split(/\s+/).map(word => 
           word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
         ).join(' ');
@@ -272,7 +739,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (parsedNames.length === 0) return;
 
     parsedNames.forEach((name) => {
-      // Generate email matching the name
       const nameParts = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(' ');
       const firstName = nameParts[0] || 'alumno';
       const lastName = nameParts[1] || 'apellido';
@@ -282,7 +748,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   };
 
-  const updateAttendance = (groupId: string, studentId: string, date: string, status: 'A' | 'F' | 'R' | 'J') => {
+  const updateAttendance = async (groupId: string, studentId: string, date: string, status: 'A' | 'F' | 'R' | 'J') => {
     setAttendanceByGroup(prev => {
       const groupAtt = prev[groupId] || {};
       const studentAtt = groupAtt[studentId] || {};
@@ -298,6 +764,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         }
       };
     });
+
+    // Supabase double-write
+    if (user) {
+      try {
+        await supabase.from('attendance').upsert({
+          user_id: user.id,
+          group_id: groupId,
+          student_id: studentId,
+          date,
+          status
+        });
+      } catch (err) {
+        console.error('Error al registrar asistencia en Supabase:', err);
+      }
+    }
   };
 
   const addCategory = (groupId: string, name: string, weight: number) => {
@@ -308,33 +789,72 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       ...prev,
       [groupId]: [...(prev[groupId] || []), newCategory]
     }));
+
+    // Supabase double-write
+    if (user) {
+      supabase.from('grade_categories').insert({
+        id,
+        user_id: user.id,
+        group_id: groupId,
+        name,
+        weight
+      }).then(({ error }) => {
+        if (error) console.error('Error al guardar categoría en Supabase:', error);
+      });
+    }
     
     return id;
   };
 
-  const updateCategories = (groupId: string, categories: GradeCategory[]) => {
+  const updateCategories = async (groupId: string, categories: GradeCategory[]) => {
     setCategoriesByGroup(prev => ({
       ...prev,
       [groupId]: categories
     }));
+
+    // Supabase double-write
+    if (user) {
+      try {
+        // Simple UPSERT for all categories
+        await supabase.from('grade_categories').upsert(
+          categories.map(c => ({
+            id: c.id,
+            user_id: user.id,
+            group_id: groupId,
+            name: c.name,
+            weight: c.weight
+          }))
+        );
+      } catch (err) {
+        console.error('Error al actualizar categorías en Supabase:', err);
+      }
+    }
   };
 
-  const deleteCategory = (groupId: string, categoryId: string) => {
+  const deleteCategory = async (groupId: string, categoryId: string) => {
     setCategoriesByGroup(prev => ({
       ...prev,
       [groupId]: (prev[groupId] || []).filter(c => c.id !== categoryId)
     }));
 
-    // Clean columns and grades of columns that belong to deleted category
     const cols = columnsByGroup[groupId] || [];
     const colsToDelete = cols.filter(c => c.categoryId === categoryId);
     
     colsToDelete.forEach(col => {
       deleteColumnGrade(groupId, col.id);
     });
+
+    // Supabase double-write
+    if (user) {
+      try {
+        await supabase.from('grade_categories').delete().eq('id', categoryId);
+      } catch (err) {
+        console.error('Error al borrar categoría en Supabase:', err);
+      }
+    }
   };
 
-  const addColumnGrade = (groupId: string, name: string, categoryId: string) => {
+  const addColumnGrade = async (groupId: string, name: string, categoryId: string) => {
     const colId = `col_${Date.now()}`;
     const newCol: ColumnGrade = { id: colId, name, categoryId };
 
@@ -343,14 +863,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       [groupId]: [...(prev[groupId] || []), newCol]
     }));
 
-    // Pre-fill grades for all students
     setGradesByGroup(prev => {
       const rows = prev[groupId] || [];
       const updatedRows = rows.map(row => ({
         ...row,
         grades: {
           ...row.grades,
-          [colId]: 'P' as const // Start as "Pendiente"
+          [colId]: 'P' as const
         }
       }));
       return {
@@ -358,9 +877,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         [groupId]: updatedRows
       };
     });
+
+    // Supabase double-write
+    if (user) {
+      try {
+        await supabase.from('grade_columns').insert({
+          id: colId,
+          user_id: user.id,
+          group_id: groupId,
+          category_id: categoryId,
+          name
+        });
+      } catch (err) {
+        console.error('Error al añadir columna de nota en Supabase:', err);
+      }
+    }
   };
 
-  const deleteColumnGrade = (groupId: string, columnId: string) => {
+  const deleteColumnGrade = async (groupId: string, columnId: string) => {
     setColumnsByGroup(prev => ({
       ...prev,
       [groupId]: (prev[groupId] || []).filter(c => c.id !== columnId)
@@ -381,9 +915,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         [groupId]: updatedRows
       };
     });
+
+    // Supabase double-write
+    if (user) {
+      try {
+        await supabase.from('grade_columns').delete().eq('id', columnId);
+      } catch (err) {
+        console.error('Error al borrar columna de nota en Supabase:', err);
+      }
+    }
   };
 
-  const updateGrade = (groupId: string, studentId: string, columnId: string, value: number | 'NP' | 'P' | 'SE') => {
+  const updateGrade = async (groupId: string, studentId: string, columnId: string, value: number | 'NP' | 'P' | 'SE') => {
     setGradesByGroup(prev => {
       const rows = prev[groupId] || [];
       let studentFound = false;
@@ -403,7 +946,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       });
 
       if (!studentFound) {
-        // If not found, add a new row
         updatedRows.push({
           studentId,
           grades: { [columnId]: value }
@@ -415,9 +957,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         [groupId]: updatedRows
       };
     });
+
+    // Supabase double-write
+    if (user) {
+      try {
+        await supabase.from('student_grades').upsert({
+          user_id: user.id,
+          group_id: groupId,
+          student_id: studentId,
+          column_id: columnId,
+          value: String(value)
+        });
+      } catch (err) {
+        console.error('Error al registrar calificación en Supabase:', err);
+      }
+    }
   };
 
-  const saveLessonPlan = (plan: Omit<LessonPlan, 'lastModified' | 'id'> & { id?: string }) => {
+  const saveLessonPlan = async (plan: Omit<LessonPlan, 'lastModified' | 'id'> & { id?: string }) => {
     const isNew = !plan.id;
     const planId = plan.id || `plan_${Date.now()}`;
     const today = new Date().toISOString().split('T')[0];
@@ -439,10 +996,43 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return prev.map(p => p.id === planId ? finalPlan : p);
       }
     });
+
+    // Supabase double-write
+    if (user) {
+      setIsSyncing(true);
+      try {
+        await supabase.from('lesson_plans').upsert({
+          id: planId,
+          user_id: user.id,
+          title: plan.title,
+          subject: plan.subject,
+          grade_level: plan.gradeLevel,
+          status: plan.status || 'Borrador',
+          steps: plan.steps,
+          last_modified: today
+        });
+      } catch (err) {
+        console.error('Error al guardar planeación en Supabase:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
   };
 
-  const deleteLessonPlan = (planId: string) => {
+  const deleteLessonPlan = async (planId: string) => {
     setLessonPlans(prev => prev.filter(p => p.id !== planId));
+
+    // Supabase double-write
+    if (user) {
+      setIsSyncing(true);
+      try {
+        await supabase.from('lesson_plans').delete().eq('id', planId);
+      } catch (err) {
+        console.error('Error al borrar planeación de Supabase:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
   };
 
   // Computations
@@ -462,11 +1052,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         total += val;
         count++;
       } else if (val === 'NP' || val === 'SE') {
-        // NP or SE counts as 0 for averaging
         total += 0;
         count++;
       }
-      // P (Pendiente) is skipped in current averages to avoid penalizing student early
     });
 
     return count > 0 ? Number((total / count).toFixed(1)) : null;
@@ -491,7 +1079,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
     if (activeCategoriesCount === 0) return 'P';
     
-    // Normalize in case not all categories have grades yet (so weightings are relative to what is graded)
     if (weightsSum > 0 && weightsSum < 100) {
       const normalizedGrade = (finalSum / (weightsSum / 100));
       return Number(normalizedGrade.toFixed(1));
@@ -505,13 +1092,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const studentRecords = groupAtt[studentId] || {};
     
     const dates = Object.keys(studentRecords);
-    if (dates.length === 0) return 100; // Perfect by default
+    if (dates.length === 0) return 100;
 
     let attended = 0;
     dates.forEach(d => {
       const state = studentRecords[d];
       if (state === 'A' || state === 'R' || state === 'J') {
-        // Attendance, Retardo (counts), and Justificado do not penalize attendance
         attended++;
       }
     });
@@ -551,7 +1137,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const getStudentsInRisk = (groupId?: string) => {
     const riskList: { student: Student; groupName: string; reason: string; avg: number; attRate: number }[] = [];
-    
     const groupsToProcess = groupId ? groups.filter(g => g.id === groupId) : groups;
 
     groupsToProcess.forEach(group => {
@@ -617,7 +1202,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       getStudentsInRisk,
       
       geminiApiKey,
-      setGeminiApiKey
+      setGeminiApiKey,
+
+      // Supabase
+      user,
+      session,
+      isSyncing,
+      isSupabaseActive,
+      login,
+      register,
+      logout,
+      syncDataFromCloud,
+      syncLocalToCloud
     }}>
       {children}
     </AppContext.Provider>

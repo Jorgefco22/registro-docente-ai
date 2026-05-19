@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   User, 
   Bell, 
@@ -7,13 +7,25 @@ import {
   Check,
   RefreshCw,
   AlertTriangle,
-  Sparkles
+  Sparkles,
+  Cloud,
+  LogOut,
+  Settings as SettingsIcon
 } from 'lucide-react';
 import { Modal } from '../components/Modal';
 import { useApp } from '../context/AppContext';
+import { supabase, setSupabaseConfig, clearSupabaseConfig } from '../lib/supabase';
 
 export const Settings: React.FC = () => {
-  const { geminiApiKey, setGeminiApiKey } = useApp();
+  const { 
+    geminiApiKey, 
+    setGeminiApiKey,
+    user,
+    logout,
+    isSyncing,
+    isSupabaseActive,
+    syncDataFromCloud
+  } = useApp();
   
   const [name, setName] = useState('Mario Reyes');
   const [email, setEmail] = useState('mario.reyes@docente.sep.gob.mx');
@@ -27,9 +39,36 @@ export const Settings: React.FC = () => {
   const [localApiKey, setLocalApiKey] = useState(geminiApiKey);
   const [isResetConfirmOpen, setIsResetConfirmOpen] = useState(false);
 
-  const handleSaveProfile = (e: React.FormEvent) => {
+  // Cloud Config states
+  const [showCloudConfig, setShowCloudConfig] = useState(false);
+  const [cloudUrl, setCloudUrl] = useState(() => localStorage.getItem('rd_supabase_url') || '');
+  const [cloudAnonKey, setCloudAnonKey] = useState(() => localStorage.getItem('rd_supabase_anon_key') || '');
+  const [cloudSaveSuccess, setCloudSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    if (user) {
+      setName(user.user_metadata?.name || '');
+      setEmail(user.email || '');
+      setSchool(user.user_metadata?.school || '');
+    }
+  }, [user]);
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaveStatus(true);
+    
+    if (user && isSupabaseActive) {
+      try {
+        // Update user metadata in Auth
+        await supabase.auth.updateUser({
+          data: { name, school }
+        });
+        // Update profile in profiles table
+        await supabase.from('profiles').update({ name, school }).eq('id', user.id);
+      } catch (err) {
+        console.error('Error al guardar perfil en la nube:', err);
+      }
+    }
     setTimeout(() => setSaveStatus(false), 2500);
   };
 
@@ -37,6 +76,25 @@ export const Settings: React.FC = () => {
     setGeminiApiKey(localApiKey.trim());
     setAiSaveStatus(true);
     setTimeout(() => setAiSaveStatus(false), 2500);
+  };
+
+  const handleSaveCloudConfig = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!cloudUrl || !cloudAnonKey) return;
+    
+    setSupabaseConfig(cloudUrl.trim(), cloudAnonKey.trim());
+    setCloudSaveSuccess(true);
+    setTimeout(() => {
+      setCloudSaveSuccess(false);
+      setShowCloudConfig(false);
+      window.location.reload();
+    }, 1500);
+  };
+
+  const handleDisconnectCloud = async () => {
+    await logout();
+    clearSupabaseConfig();
+    window.location.reload();
   };
 
   const handleRestoreDatabase = () => {
@@ -265,6 +323,117 @@ export const Settings: React.FC = () => {
 
         {/* Database & backup Column */}
         <aside className="settings-side-col">
+          {/* Cloud Database Integration (Supabase) */}
+          <div className="glass-card settings-card" style={{ borderLeft: '4px solid #0071e3', marginBottom: '20px' }}>
+            <div className="settings-card-header">
+              <Cloud size={18} style={{ color: '#0071e3' }} />
+              <h3>Conexión Cloud (Supabase)</h3>
+            </div>
+
+            {isSupabaseActive ? (
+              <div className="form-group-flex">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <div className="status-indicator-dot online"></div>
+                  <span style={{ fontSize: '0.82rem', fontWeight: '600', color: '#34c759' }}>Conectado a la Nube</span>
+                </div>
+
+                {user && (
+                  <div className="cloud-profile-summary" style={{ fontSize: '0.8rem', padding: '12px', background: 'rgba(255,255,255,0.03)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <span style={{ color: 'var(--color-text-secondary)' }}>Usuario: <strong>{user.email}</strong></span>
+                    {user.user_metadata?.school && (
+                      <span style={{ color: 'var(--color-text-tertiary)', fontSize: '0.72rem' }}>Escuela: {user.user_metadata.school}</span>
+                    )}
+                  </div>
+                )}
+
+                <div className="settings-buttons-vertical" style={{ gap: '10px', marginTop: '8px' }}>
+                  <button 
+                    onClick={syncDataFromCloud} 
+                    className="btn btn-secondary btn-full"
+                    disabled={isSyncing}
+                    style={{ gap: '8px' }}
+                  >
+                    <RefreshCw size={14} className={isSyncing ? 'spin-animation' : ''} />
+                    <span>{isSyncing ? 'Sincronizando...' : 'Sincronizar con la Nube'}</span>
+                  </button>
+
+                  <button 
+                    onClick={handleDisconnectCloud} 
+                    className="btn btn-danger-outlined btn-full"
+                    style={{ gap: '8px', border: '1px solid rgba(255, 69, 58, 0.3)', background: 'rgba(255, 69, 58, 0.05)', color: '#ff453a', height: '38px', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '600', fontSize: '0.85rem' }}
+                  >
+                    <LogOut size={14} />
+                    <span>Cerrar Sesión</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="form-group-flex">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <div className="status-indicator-dot offline"></div>
+                  <span style={{ fontSize: '0.82rem', fontWeight: '600', color: 'var(--color-text-secondary)' }}>Modo Local Activo</span>
+                </div>
+
+                <p className="settings-aside-desc" style={{ fontSize: '0.75rem', lineHeight: '1.4', margin: '0 0 12px 0' }}>
+                  Conecta tu proyecto privado de Supabase para sincronizar tus calificaciones en la nube y habilitar el login obligatorio de seguridad.
+                </p>
+
+                {showCloudConfig ? (
+                  <form onSubmit={handleSaveCloudConfig} style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
+                    {cloudSaveSuccess && (
+                      <div className="form-success-banner" style={{ margin: '0 0 8px 0' }}>
+                        <span>¡Credenciales guardadas con éxito! Reiniciando...</span>
+                      </div>
+                    )}
+                    
+                    <div className="form-field" style={{ margin: 0 }}>
+                      <label style={{ fontSize: '0.75rem' }}>URL de Supabase</label>
+                      <input
+                        type="url"
+                        value={cloudUrl}
+                        onChange={(e) => setCloudUrl(e.target.value)}
+                        placeholder="https://xxxxxx.supabase.co"
+                        required
+                        style={{ fontSize: '0.8rem', padding: '8px 12px' }}
+                      />
+                    </div>
+
+                    <div className="form-field" style={{ margin: 0 }}>
+                      <label style={{ fontSize: '0.75rem' }}>Anon Key (Clave Pública)</label>
+                      <input
+                        type="password"
+                        value={cloudAnonKey}
+                        onChange={(e) => setCloudAnonKey(e.target.value)}
+                        placeholder="eyJhbGciOiJIUzI1Ni..."
+                        required
+                        style={{ fontSize: '0.8rem', padding: '8px 12px' }}
+                      />
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                      <button type="submit" className="btn btn-primary" style={{ flexGrow: 1, height: '36px', fontSize: '0.8rem', padding: 0 }}>
+                        Conectar
+                      </button>
+                      <button type="button" onClick={() => setShowCloudConfig(false)} className="btn btn-secondary" style={{ flexGrow: 1, height: '36px', fontSize: '0.8rem', padding: 0 }}>
+                        Cancelar
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <button 
+                    onClick={() => setShowCloudConfig(true)} 
+                    className="btn btn-primary btn-full"
+                    style={{ background: 'linear-gradient(135deg, #0071e3 0%, #00c6ff 100%)', borderColor: 'transparent' }}
+                  >
+                    <SettingsIcon size={14} style={{ marginRight: '6px' }} />
+                    <span>Conectar Supabase</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Database & backup Card */}
           <div className="glass-card settings-card danger-section">
             <div className="settings-card-header">
               <Database size={18} className="text-danger" />
@@ -272,7 +441,9 @@ export const Settings: React.FC = () => {
             </div>
             
             <p className="settings-aside-desc">
-              Toda la información académica de este MVP se almacena de forma segura en tu navegador local (localStorage).
+              {isSupabaseActive 
+                ? 'Tus datos se encuentran respaldados en Supabase, pero puedes descargar una copia local JSON o borrar las configuraciones locales.' 
+                : 'Toda la información académica de este MVP se almacena de forma segura en tu navegador local (localStorage).'}
             </p>
 
             <div className="settings-buttons-vertical">
@@ -299,8 +470,8 @@ export const Settings: React.FC = () => {
           <div className="settings-tip-card">
             <Shield className="tip-icon" />
             <div className="tip-content">
-              <h4>Seguridad Local</h4>
-              <p>Este sistema está diseñado para cumplir con las normas de privacidad del alumnado. Ninguna información escolar es compartida con servidores externos sin tu consentimiento expreso.</p>
+              <h4>Seguridad de Datos</h4>
+              <p>El sistema cuenta con cifrado en tránsito y seguridad a nivel de filas (RLS) en Supabase para evitar accesos no autorizados.</p>
             </div>
           </div>
         </aside>

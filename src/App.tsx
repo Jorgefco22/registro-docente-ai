@@ -1,5 +1,5 @@
-import React from 'react';
-import { AppProvider } from './context/AppContext';
+import React, { useState } from 'react';
+import { AppProvider, useApp } from './context/AppContext';
 import { NavigationProvider, useNavigation } from './context/NavigationContext';
 import { Sidebar } from './components/Sidebar';
 import { BottomNav } from './components/BottomNav';
@@ -12,9 +12,22 @@ import { Planning } from './views/Planning';
 import { AIPlanner } from './views/AIPlanner';
 import { Messages } from './views/Messages';
 import { Settings } from './views/Settings';
+import { Login } from './views/Login';
+import { Register } from './views/Register';
 
 const AppContent: React.FC = () => {
   const { currentView } = useNavigation();
+  const { user, isSupabaseActive } = useApp();
+  const [authScreen, setAuthScreen] = useState<'login' | 'register'>('login');
+
+  // Login obligatorio: Si Supabase está activo pero no hay sesión iniciada
+  if (isSupabaseActive && !user) {
+    if (authScreen === 'login') {
+      return <Login onToggleView={() => setAuthScreen('register')} />;
+    } else {
+      return <Register onToggleView={() => setAuthScreen('login')} />;
+    }
+  }
 
   const renderView = () => {
     switch (currentView) {
@@ -64,3 +77,4 @@ function App() {
 }
 
 export default App;
+
