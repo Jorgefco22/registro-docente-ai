@@ -1,22 +1,28 @@
 PODS:
   - Capacitor (8.3.4):
     - CapacitorCordova
+  - CapacitorCommunityBarcodeScanner (4.0.1):
+    - Capacitor
   - CapacitorCordova (8.3.4)
 
 DEPENDENCIES:
   - "Capacitor (from `../../node_modules/@capacitor/ios`)"
+  - "CapacitorCommunityBarcodeScanner (from `../../node_modules/@capacitor-community/barcode-scanner`)"
   - "CapacitorCordova (from `../../node_modules/@capacitor/ios`)"
 
 EXTERNAL SOURCES:
   Capacitor:
     :path: "../../node_modules/@capacitor/ios"
+  CapacitorCommunityBarcodeScanner:
+    :path: "../../node_modules/@capacitor-community/barcode-scanner"
   CapacitorCordova:
     :path: "../../node_modules/@capacitor/ios"
 
 SPEC CHECKSUMS:
   Capacitor: d13cad5fa09155679672808cc4ca9fbc2997e1b4
+  CapacitorCommunityBarcodeScanner: 100051f49caad62966f331cbdf6844a3e51db8e9
   CapacitorCordova: c07921bdcfec6f691bae22274446b4d606ebf6a4
 
-PODFILE CHECKSUM: b9069f1c534530d75a6f8a7e540134de4d6d2596
+PODFILE CHECKSUM: 82d0ae61bf8b77e88f3e3935f3665e021b9b0e6a
 
 COCOAPODS: 1.16.2

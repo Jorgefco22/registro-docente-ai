@@ -3085,3 +3085,31 @@ input:focus, select:focus, textarea:focus {
   width: 100%;
 }
 
+/* ---------------------------------------------------- */
+/* CAPACITOR NATIVE QR SCANNER OVERLAYS                 */
+/* ---------------------------------------------------- */
+body.qr-scanner-active {
+  background: transparent !important;
+}
+
+body.qr-scanner-active #root,
+body.qr-scanner-active .app-layout,
+body.qr-scanner-active .app-main-content,
+body.qr-scanner-active .view-container,
+body.qr-scanner-active .qr-scanner-container {
+  background: transparent !important;
+}
+
+body.qr-scanner-active .qr-viewport-card .camera-viewport {
+  background: transparent !important;
+  border-color: rgba(0, 113, 227, 0.8) !important;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.7); /* Spotlight focus effect */
+}
+
+body.qr-scanner-active .app-layout > *:not(.app-main-content),
+body.qr-scanner-active .qr-scanner-header > *:not(.btn-back-square) {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+
