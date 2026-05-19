@@ -51,6 +51,10 @@ interface AppContextProps {
   getGroupAverage: (groupId: string) => number;
   getGroupAttendanceRate: (groupId: string) => number;
   getStudentsInRisk: (groupId?: string) => { student: Student; groupName: string; reason: string; avg: number; attRate: number }[];
+  
+  // AI Settings
+  geminiApiKey: string;
+  setGeminiApiKey: (key: string) => void;
 }
 
 const AppContext = createContext<AppContextProps | undefined>(undefined);
@@ -92,6 +96,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return saved ? JSON.parse(saved) : initialLessonPlans;
   });
 
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    return localStorage.getItem('rd_gemini_api_key') || '';
+  });
+
   // Save to localStorage whenever state changes
   useEffect(() => {
     localStorage.setItem('rd_groups', JSON.stringify(groups));
@@ -120,6 +128,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => {
     localStorage.setItem('rd_lesson_plans', JSON.stringify(lessonPlans));
   }, [lessonPlans]);
+
+  useEffect(() => {
+    localStorage.setItem('rd_gemini_api_key', geminiApiKey);
+  }, [geminiApiKey]);
 
   // Actions
   const addGroup = (name: string, subject: string, grade: string, schedule: string) => {
@@ -602,7 +614,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       getStudentAttendanceRate,
       getGroupAverage,
       getGroupAttendanceRate,
-      getStudentsInRisk
+      getStudentsInRisk,
+      
+      geminiApiKey,
+      setGeminiApiKey
     }}>
       {children}
     </AppContext.Provider>

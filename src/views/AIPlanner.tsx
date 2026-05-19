@@ -39,13 +39,14 @@ const aiSimulations = {
 };
 
 export const AIPlanner: React.FC = () => {
-  const { activePlanId, goBack } = useNavigation();
-  const { lessonPlans, saveLessonPlan } = useApp();
+  const { activePlanId, goBack, navigateTo } = useNavigation();
+  const { lessonPlans, saveLessonPlan, geminiApiKey } = useApp();
 
   const [activeStep, setActiveStep] = useState(1);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationType, setGenerationType] = useState('');
   const [activeInputFocus, setActiveInputFocus] = useState<string>('objectives');
+  const [apiError, setApiError] = useState<string | null>(null);
 
   // Plan State Variables
   const initialPlan = activePlanId ? lessonPlans.find(p => p.id === activePlanId) : null;
@@ -71,21 +72,175 @@ export const AIPlanner: React.FC = () => {
 
   const [status, setStatus] = useState<'Completa' | 'Borrador'>(initialPlan ? initialPlan.status : 'Borrador');
 
+  // Automatically select primary field on step change to align Copilot context
+  React.useEffect(() => {
+    if (activeStep === 2) {
+      setActiveInputFocus('objectives');
+    } else if (activeStep === 3) {
+      setActiveInputFocus('development');
+    } else if (activeStep === 4) {
+      setActiveInputFocus('rubrics');
+    } else if (activeStep === 5) {
+      setActiveInputFocus('adjustments');
+    }
+    setApiError(null);
+  }, [activeStep]);
+
   // Keep track of which textarea is active to apply the AI rewrite
   const handleFocus = (field: string) => {
     setActiveInputFocus(field);
   };
 
-  // Simulate AI generative call
-  const triggerAICopilot = (action: 'improve' | 'formal' | 'simple' | 'secundary' | 'preparatory' | 'activity' | 'rubric') => {
-    setIsGenerating(true);
-    setGenerationType(action === 'improve' ? 'Mejorando redacción' : 
-                       action === 'formal' ? 'Formalizando vocabulario' :
-                       action === 'simple' ? 'Simplificando contenido' :
-                       action === 'activity' ? 'Estructurando actividad práctica' :
-                       action === 'rubric' ? 'Generando Rúbrica avanzada' :
-                       'Adaptando nivel académico');
+  const getFieldValue = (field: string): string => {
+    switch (field) {
+      case 'objectives': return objectives;
+      case 'expectedLearning': return expectedLearning;
+      case 'start': return seqStart;
+      case 'development': return seqDev;
+      case 'close': return seqClose;
+      case 'evidence': return evidence;
+      case 'rubrics': return rubrics;
+      case 'instruments': return instruments;
+      case 'resources': return resources;
+      case 'adjustments': return adjustments;
+      case 'observations': return observations;
+      default: return '';
+    }
+  };
 
+  const setFieldValue = (field: string, value: string) => {
+    let cleanVal = value.trim();
+    // Clean code formatting blocks if AI returns Markdown fenced blocks
+    if (cleanVal.startsWith('```')) {
+      const firstNewLine = cleanVal.indexOf('\n');
+      if (firstNewLine !== -1) {
+        cleanVal = cleanVal.substring(firstNewLine + 1).trim();
+      }
+      if (cleanVal.endsWith('```')) {
+        cleanVal = cleanVal.substring(0, cleanVal.length - 3).trim();
+      }
+    }
+    // Trim simple double quotes
+    if (cleanVal.startsWith('"') && cleanVal.endsWith('"')) {
+      cleanVal = cleanVal.slice(1, -1).trim();
+    }
+    
+    switch (field) {
+      case 'objectives': setObjectives(cleanVal); break;
+      case 'expectedLearning': setExpectedLearning(cleanVal); break;
+      case 'start': setSeqStart(cleanVal); break;
+      case 'development': setSeqDev(cleanVal); break;
+      case 'close': setSeqClose(cleanVal); break;
+      case 'evidence': setEvidence(cleanVal); break;
+      case 'rubrics': setRubrics(cleanVal); break;
+      case 'instruments': setInstruments(cleanVal); break;
+      case 'resources': setResources(cleanVal); break;
+      case 'adjustments': setAdjustments(cleanVal); break;
+      case 'observations': setObservations(cleanVal); break;
+    }
+  };
+
+  const getSystemPrompt = (subjectStr: string, gradeStr: string) => {
+    return `Eres un Asistente de Inteligencia Artificial experto en diseño curricular y pedagogía oficial.
+Estás redactando una sección para la planeación didáctica de la asignatura "${subjectStr}" de nivel "${gradeStr}".
+
+REGLAS ABSOLUTAS:
+1. Tu respuesta DEBE contener ÚNICAMENTE el texto pedagógico generado o mejorado listo para insertarse en el campo de texto.
+2. NO incluyas introducciones como "Aquí tienes...", explicaciones, saludos ni notas ("Espero que te sea de ayuda").
+3. Escribe directamente el contenido final en idioma español.
+4. Mantén un vocabulario formal, estructurado, profesional y apegado a la didáctica escolar actual.`;
+  };
+
+  const getUserPrompt = (step: number, action: string, currentValue: string) => {
+    let instruction = '';
+    if (step === 2) {
+      if (action === 'improve') instruction = 'Enriquece y perfecciona la redacción de estos objetivos o competencias, empleando verbos de la taxonomía de Bloom y un enfoque pedagógico constructivista.';
+      else if (action === 'formal') instruction = 'Transforma este propósito de clase para hacerlo sumamente académico, formal y técnico, adecuado para un plan de estudio oficial.';
+      else if (action === 'simple') instruction = 'Reescribe este objetivo didáctico para que sea simple, directo y sumamente comprensible para los estudiantes y sus tutores.';
+      else if (action === 'secundary') instruction = 'Adapta y redacta esta competencia escolar para el nivel de Educación Secundaria (alumnos de 12 a 15 años).';
+      else if (action === 'preparatory') instruction = 'Adapta y redacta esta competencia escolar para el nivel de Bachillerato / Preparatoria (alumnos de 15 a 18 años).';
+    } else if (step === 3) {
+      if (action === 'improve') instruction = 'Amplía y perfecciona la descripción de estas actividades de clase, sugiriendo metodologías activas y estimaciones de tiempo.';
+      else if (action === 'formal') instruction = 'Reescribe esta secuencia de actividades con un tono altamente técnico y formal de planeación de aula.';
+      else if (action === 'simple') instruction = 'Reescribe estas actividades para que sean muy pragmáticas y directas, claras de ejecutar.';
+      else if (action === 'activity') instruction = 'Diseña una actividad interactiva didáctica y dinámica (por ejemplo: un rally, gamificación con puntajes, o técnica de rompecabezas cooperativo) adaptada al tema actual para involucrar a los alumnos de forma divertida.';
+    } else if (step === 4) {
+      if (action === 'improve') instruction = 'Mejora la redacción de estas evidencias e instrumentos de evaluación escolar para hacerlos medibles, claros y de alta calidad técnica.';
+      else if (action === 'rubric') instruction = 'Genera una rúbrica analítica detallada de evaluación. Incluye una escala con niveles (Excelente, Bueno, Regular, Insuficiente) y criterios claros basados en el tema de la planeación.';
+    } else if (step === 5) {
+      if (action === 'improve') instruction = 'Enriquece los recursos escolares y sugiere adecuaciones curriculares inclusivas de alta calidad (ej. técnicas específicas para alumnos con TDAH, ritmos de aprendizaje lentos o rezago).';
+      else if (action === 'simple') instruction = 'Haz que la lista de recursos y adecuaciones escolares sea muy pragmática, simple y directa.';
+    }
+
+    if (!instruction) instruction = 'Perfecciona y enriquece pedagógicamente la redacción del siguiente texto.';
+
+    return `${instruction}
+
+Texto actual de referencia a transformar:
+"${currentValue}"`;
+  };
+
+  // Trigger Gemini AI Generative Copilot or simulation fallback
+  const triggerAICopilot = async (action: 'improve' | 'formal' | 'simple' | 'secundary' | 'preparatory' | 'activity' | 'rubric') => {
+    setIsGenerating(true);
+    setApiError(null);
+    const label = action === 'improve' ? 'Enriqueciendo redacción' : 
+                  action === 'formal' ? 'Formalizando vocabulario' :
+                  action === 'simple' ? 'Simplificando contenido' :
+                  action === 'activity' ? 'Estructurando actividad lúdica' :
+                  action === 'rubric' ? 'Generando rúbrica analítica' :
+                  'Adaptando nivel educativo';
+    setGenerationType(label);
+
+    if (geminiApiKey) {
+      try {
+        const sys = getSystemPrompt(subject, gradeLevel);
+        const usr = getUserPrompt(activeStep, action, getFieldValue(activeInputFocus));
+
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              contents: [
+                {
+                  role: 'user',
+                  parts: [{ text: `${sys}\n\n${usr}` }]
+                }
+              ],
+              generationConfig: {
+                temperature: 0.7,
+                maxOutputTokens: 1000
+              }
+            })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `Error del servidor (HTTP ${response.status})`);
+        }
+
+        const data = await response.json();
+        const textResult = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!textResult) {
+          throw new Error('No se recibió texto de respuesta de la IA de Gemini.');
+        }
+
+        setFieldValue(activeInputFocus, textResult);
+      } catch (error: any) {
+        console.error('Error al llamar a la API de Gemini:', error);
+        setApiError(error.message || 'Error de conexión desconocido.');
+      } finally {
+        setIsGenerating(false);
+      }
+      return;
+    }
+
+    // Fallback: Simulation mode
     setTimeout(() => {
       setIsGenerating(false);
       
@@ -125,7 +280,7 @@ export const AIPlanner: React.FC = () => {
         if (action === 'improve') setResources(aiSimulations.resources.improve);
         else if (action === 'simple') setAdjustments(aiSimulations.resources.simple);
       }
-    }, 1500);
+    }, 1200);
   };
 
   const handleSave = () => {
@@ -521,26 +676,111 @@ export const AIPlanner: React.FC = () => {
         {activeStep < 6 && (
           <aside className="ai-copilot-aside no-print">
             <div className="copilot-card">
-              <div className="copilot-header">
-                <Sparkles className="spark-spin" />
-                <h3>Copiloto AI</h3>
+              <div className="copilot-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <Sparkles className="spark-spin" style={{ color: geminiApiKey ? '#8e2de2' : '#55a6ff' }} />
+                  <h3>Copiloto AI</h3>
+                </div>
+                {geminiApiKey ? (
+                  <span style={{ 
+                    fontSize: '9px', 
+                    padding: '3px 8px', 
+                    borderRadius: '12px', 
+                    background: 'rgba(52, 199, 89, 0.15)', 
+                    color: '#34c759', 
+                    fontWeight: '600',
+                    border: '1px solid rgba(52, 199, 89, 0.3)'
+                  }}>
+                    CONECTADO
+                  </span>
+                ) : (
+                  <span style={{ 
+                    fontSize: '9px', 
+                    padding: '3px 8px', 
+                    borderRadius: '12px', 
+                    background: 'rgba(255, 149, 0, 0.15)', 
+                    color: '#ff9500', 
+                    fontWeight: '600',
+                    border: '1px solid rgba(255, 149, 0, 0.3)'
+                  }}>
+                    SIMULADO
+                  </span>
+                )}
               </div>
               
               <p className="copilot-desc">
                 Haz foco en cualquier cuadro de texto de la izquierda y pídele a la IA perfeccionar tu redacción de forma estructurada.
                 {activeInputFocus && (
-                  <span className="copilot-active-field-badge" style={{ display: 'block', marginTop: '6px', fontSize: '11px', color: 'var(--color-primary)' }}>
+                  <span className="copilot-active-field-badge" style={{ display: 'block', marginTop: '6px', fontSize: '11px', color: '#55a6ff' }}>
                     Foco activo: <strong>{activeInputFocus}</strong>
                   </span>
                 )}
               </p>
 
+              {/* Demo Mode Banner inside Copilot Panel */}
+              {!geminiApiKey && (
+                <div style={{
+                  background: 'rgba(142, 45, 226, 0.08)',
+                  border: '1px dashed rgba(142, 45, 226, 0.25)',
+                  borderRadius: '12px',
+                  padding: '12px',
+                  marginBottom: '16px',
+                  fontSize: '0.75rem',
+                  lineHeight: '1.4'
+                }}>
+                  <div style={{ fontWeight: '700', color: '#a855f7', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '4px' }}>
+                    <Sparkles size={12} /> Modo Demostración
+                  </div>
+                  <p style={{ opacity: 0.85, marginBottom: '10px' }}>
+                    Estás viendo respuestas demo simuladas. Agrega tu clave gratis de Google para activar el copiloto en tiempo real.
+                  </p>
+                  <button 
+                    onClick={() => navigateTo('settings')}
+                    style={{
+                      background: 'linear-gradient(135deg, #8e2de2 0%, #4a00e0 100%)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '8px',
+                      padding: '6px 12px',
+                      fontSize: '10px',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      width: '100%',
+                      textAlign: 'center',
+                      boxShadow: '0 4px 10px rgba(142, 45, 226, 0.2)'
+                    }}
+                  >
+                    Configurar Gemini Real
+                  </button>
+                </div>
+              )}
+
+              {/* Error Banner */}
+              {apiError && (
+                <div style={{
+                  padding: '12px',
+                  borderRadius: '12px',
+                  backgroundColor: 'rgba(255, 59, 48, 0.12)',
+                  border: '1px solid rgba(255, 59, 48, 0.25)',
+                  color: '#ff3b30',
+                  fontSize: '0.75rem',
+                  marginBottom: '16px',
+                  lineHeight: '1.4'
+                }}>
+                  <strong>⚠️ Error en Gemini:</strong> {apiError}
+                  <div style={{ marginTop: '8px', display: 'flex', gap: '8px' }}>
+                    <button onClick={() => navigateTo('settings')} style={{ background: '#ff3b30', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', border: 'none', cursor: 'pointer', fontWeight: '600' }}>Revisar Key</button>
+                    <button onClick={() => setApiError(null)} style={{ background: 'transparent', color: '#ff3b30', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', border: '1px solid #ff3b30', cursor: 'pointer', fontWeight: '600' }}>Descartar</button>
+                  </div>
+                </div>
+              )}
+
               {/* Loader visual */}
               {isGenerating ? (
                 <div className="copilot-loader">
-                  <RefreshCw size={24} className="spin" />
+                  <RefreshCw size={24} className="spin" style={{ color: '#55a6ff' }} />
                   <h4>{generationType}...</h4>
-                  <p>Redactando contenido pedagógico con IA avanzada...</p>
+                  <p>{geminiApiKey ? 'Generando respuesta en tiempo real con Gemini AI...' : 'Simulando generación de contenido pedagógico...'}</p>
                 </div>
               ) : (
                 <div className="copilot-buttons-list">
